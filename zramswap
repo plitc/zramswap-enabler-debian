@@ -1,0 +1,109 @@
+#!/bin/sh -e
+#
+# Initializes zram swapping
+#
+### BEGIN INIT INFO
+# Provides:          zramswap
+# Required-Start:    
+# Required-Stop:     
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Initializes zram swapping
+# Description:       zram is a module bla bla bla etc
+### END INIT INFO
+
+NAME=zramswap
+
+. /lib/lsb/init-functions
+
+get_number_of_present_cpus() {
+	cpulist=$( cat /sys/devices/system/cpu/present | tr ',' ' ' )
+	local num_cpus=0
+	for item in $cpulist; do
+	if ( echo $item | grep --silent '-' ); then
+		greater_cpunum=$( echo $item | cut -d '-' -f 2 )
+		lesser_cpunum=$( echo $item | cut -d '-' -f 1 )
+		local num_cpus=$(( $num_cpus + $greater_cpunum - $lesser_cpunum + 1 ))
+	else
+		local num_cpus=$(( $num_cpus + 1 ))
+	fi
+	done
+	echo $num_cpus
+}
+
+case "$1" in
+  start)
+	log_daemon_msg "Starting zram swap "
+
+	# get the number of CPUs
+	num_cpus=$(get_number_of_present_cpus)
+	
+	# set decremented number of CPUs
+	decr_num_cpus=$((num_cpus - 1))
+	
+	# get the amount of memory in the machine
+	mem_total_kb=$(grep MemTotal /proc/meminfo | grep -E --only-matching '[[:digit:]]+')
+	mem_total=$((mem_total_kb * 1024))
+	
+	# determine modprobe parameter name, depending on kernel version
+	if (uname --release | grep -E --silent "^3\.[123]"); then
+		num_devices_parameter='zram_num_devices'
+	else
+		num_devices_parameter='num_devices'
+	fi
+	
+	# load zram modules
+	modprobe zram $num_devices_parameter=$num_cpus
+	exitval=$?
+	log_progress_msg "zram"
+
+	# initialize the devices, set total size to 1/2 RAM
+	for i in $(seq 0 $decr_num_cpus); do
+		echo $((mem_total / 2 / num_cpus)) > /sys/block/zram$i/disksize
+	done
+	
+	# Creating swap filesystems
+	for i in $(seq 0 $decr_num_cpus); do
+		mkswap /dev/zram$i > /dev/null
+	done
+	log_progress_msg "mkswap"
+	
+	# Switch the swaps on
+	for i in $(seq 0 $decr_num_cpus); do
+		swapon -p 100 /dev/zram$i
+	done
+	log_progress_msg "swapon"
+	log_end_msg $exitval
+	;;
+  stop)
+	log_daemon_msg "Stopping zram swap " 
+	# Switching off swap
+	for device in $(grep -E --only-matching '/dev/zram[[:digit:]]+' /proc/swaps); do
+		swapoff "$device"
+		exitval=$?
+	done
+	log_progress_msg "swapoff"
+	# remove module, wait instead of failing if it's busy
+	rmmod --wait zram
+	exitval=$?
+	log_progress_msg "zram"
+	log_end_msg $exitval
+	;;
+  restart|force-reload)
+	$0 stop
+        # Wait for things to settle down
+        sleep 1
+	$0 start
+	;;
+  reload)
+        log_warning_msg "Reloading $NAME daemon: not implemented, as the daemon"
+        log_warning_msg "cannot re-read the config file (use restart)."
+        ;;
+  *)
+	N=/etc/init.d/$NAME
+	echo "Usage: $N {start|stop|restart|force-reload}" >&2
+	exit 1
+	;;
+esac
+
+exit 0
